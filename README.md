@@ -69,6 +69,47 @@ YANTRIKDB_DB_PATH=~/.hermes/yantrikdb-memory.db \
 scripts/start.sh
 ```
 
+## Optional: HTTP backend mode (talk to a yantrikdb-server cluster)
+
+The default mode reads the embedded-mode SQLite store at `YANTRIKDB_DB_PATH` directly — perfect for the single-instance Hermes plugin install. If you instead run `yantrikdb-server` on an HA cluster, set `YANTRIKDB_SERVER_URL` and the dashboard proxies supported routes to the cluster instead:
+
+```bash
+YANTRIKDB_SERVER_URL=http://your-cluster.local:7438 \
+YANTRIKDB_TOKEN=ydb_... \
+scripts/start.sh
+```
+
+Requires **yantrikdb-server v0.8.17 or later** for Phase 1 dashboard endpoints (`/v1/memories`, `/v1/memory/{rid}`, `/v1/stats`, `/v1/health`). Docker:
+
+```bash
+docker pull ghcr.io/yantrikos/yantrikdb:0.8.17
+```
+
+### What works in HTTP mode (Phase 1)
+
+| Dashboard route | Server endpoint |
+| --- | --- |
+| `GET /api/health` | `GET /v1/health` |
+| `GET /api/stats` | `GET /v1/stats` |
+| `GET /api/memories` (filters + pagination) | `GET /v1/memories` |
+| `GET /api/memory/{rid}` | `GET /v1/memory/{rid}` |
+
+That covers the overview, memory browser, and detail drawer.
+
+### What's deferred (Phase 2 + 3)
+
+Routes that need server endpoints not yet exposed over HTTP return **501** with a pointer to the tracking issue:
+
+- Recall debugger, conflicts review/resolve, think, forget — pending server-side endpoint additions
+- Identity & Scope page — `/v1/identity-scope` exists in v0.8.17 but the dashboard wiring is Phase 2
+- Visualiser, entity graph, lifecycle (stale/upcoming), patterns/triggers, JSONL export — pending `/v1/entities`, `/v1/graph/{entity}`, `/v1/sessions`, `/v1/stale`, `/v1/upcoming`, `/v1/patterns`, `/v1/triggers`, `/v1/export/memories.jsonl`
+
+Status of the engine-side endpoints lives at [yantrikos/yantrikdb-server#39](https://github.com/yantrikos/yantrikdb-server/issues/39).
+
+### Reverting to SQLite mode
+
+Unset `YANTRIKDB_SERVER_URL` and the dashboard reads SQLite again — no other config change needed.
+
 ## Persistent macOS service
 
 For a dashboard that starts on login and restarts after crashes, install the LaunchAgent:

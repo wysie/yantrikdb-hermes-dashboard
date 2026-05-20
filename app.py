@@ -51,7 +51,15 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 ADMIN_MODE_ENV = env_bool("YANTRIKDB_DASHBOARD_ADMIN_MODE", False)
 
-app = FastAPI(title="YantrikDB for Hermes", version="0.1.3")
+# HTTP backend mode (optional). When YANTRIKDB_SERVER_URL is set the
+# dashboard proxies supported routes to that yantrikdb-server v0.8.17+
+# cluster instead of reading the embedded SQLite store. When unset,
+# behaviour is unchanged: routes read SQLite directly as before.
+from backend import HTTPBackend, NotImplementedHTTPBackend, make_backend, not_implemented_response  # noqa: E402
+
+HTTP_BACKEND: HTTPBackend | None = make_backend()
+
+app = FastAPI(title="YantrikDB for Hermes", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1", "http://localhost"],
@@ -70,6 +78,12 @@ def now() -> float:
 
 
 def connect() -> sqlite3.Connection:
+    # In HTTP-backend mode there is no local SQLite file by design.
+    # Any route that still falls through to a SQL helper (rows/one/etc.)
+    # is one we haven't wrapped yet — surface that as a 501 with a
+    # clear pointer to issue #39 rather than a confusing 500.
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("SQL-backed route")
     if not DB_PATH.exists():
         raise HTTPException(500, f"YantrikDB database not found: {DB_PATH}")
     conn = sqlite3.connect(str(DB_PATH), timeout=5.0)
@@ -291,6 +305,8 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        return HTTP_BACKEND.health()
     try:
         core_version = importlib_metadata.version("yantrikdb")
     except Exception:
@@ -732,6 +748,8 @@ def auth_logout() -> Response:
 
 @app.get("/api/stats")
 def stats(namespace: str = Query(DEFAULT_NAMESPACE)) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        return HTTP_BACKEND.stats(namespace)
     mem_ns_clauses, mem_ns_params = namespace_clause("namespace", namespace)
     mem_where = " AND ".join(mem_ns_clauses) if mem_ns_clauses else "1=1"
     mem_counts = rows(
@@ -799,6 +817,11 @@ def memories(
     offset: int = Query(0, ge=0),
     sort: str = "created_at",
 ) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        return HTTP_BACKEND.list_memories(
+            namespace=namespace, status=status, domain=domain, source=source,
+            memory_type=memory_type, q=q, limit=limit, offset=offset, sort=sort,
+        )
     clauses, params = namespace_clause("namespace", namespace)
     if status and status != "all":
         clauses.append("consolidation_status=?")
@@ -835,6 +858,8 @@ def memories(
 
 @app.get("/api/memory/{rid}")
 def memory_detail(rid: str) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        return HTTP_BACKEND.get_memory(rid)
     m = one("SELECT *, length(embedding) embedding_bytes FROM memories WHERE rid=?", (rid,))
     if not m:
         raise HTTPException(404, "memory not found")
