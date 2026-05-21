@@ -184,7 +184,16 @@ async function refreshAll(){
     const options=`<option value="${ALL_NAMESPACES}">All namespaces (${fmt(nsRows.reduce((a,n)=>a+Number(n.count||0),0))})</option>`+nsRows.map(n=>`<option value="${esc(n.namespace)}">${esc(n.namespace)} (${fmt(n.count)})</option>`).join('');
     const memSel=$('#memoryNamespaceFilter'); const scopeSel=$('#scopeSelect');
     const requested=new URLSearchParams(location.search).get('namespace');
-    const prev=(requested || state.selectedNamespace || ALL_NAMESPACES);
+    let prev=(requested || state.selectedNamespace || ALL_NAMESPACES);
+    // HTTP-cluster mode has no local SQLite to enumerate namespaces from, so
+    // health.namespaces is empty. Sending __all__ to /v1/stats or /v1/memories
+    // would 400 because the server has no dashboard magic value — fall back to
+    // the configured default_namespace on first load (no URL param, no prior
+    // explicit choice) in that mode. Explicit __all__ picks still come through
+    // via requested.
+    if(state.health.mode==='http' && !requested && prev===ALL_NAMESPACES && state.defaultNamespace){
+      prev=state.defaultNamespace;
+    }
     state.selectedNamespace=prev;
     [memSel,scopeSel].filter(Boolean).forEach(s=>{
       s.innerHTML=options;
@@ -664,7 +673,7 @@ function memoryItem(m){
 async function selectMemory(rid, opts={}){
   state.selectedMemory=rid;
   $$('#memoryList .memory-item').forEach(x=>x.classList.toggle('active',x.dataset.rid===rid));
-  const m=await api('/api/memory/'+encodeURIComponent(rid));
+  const m=await api('/api/memory/'+encodeURIComponent(rid)+'?namespace='+encodeURIComponent(ns()));
   $('.drawer-title').textContent='YantrikDB memory';
   $('#memoryDrawerBody').innerHTML=detailHtml(m);
   $('#memoryDrawer').classList.remove('hidden');

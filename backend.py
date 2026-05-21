@@ -106,7 +106,7 @@ class HTTPBackend:
 
     # ----- Supported routes (v0.8.17 Phase 1) -----
 
-    def health(self) -> dict[str, Any]:
+    def health(self, *, base_namespace: str = "", default_namespace: str = "") -> dict[str, Any]:
         """Proxy /v1/health and adapt to the dashboard's /api/health shape.
 
         The server returns cluster/raft info; the dashboard expects a
@@ -114,6 +114,13 @@ class HTTPBackend:
         the dashboard-shaped fields from what the server exposes and
         leave SQLite-only fields (db_path, db_size_bytes, settings_path)
         as HTTP-mode markers so the UI knows it's in cluster mode.
+
+        ``base_namespace`` / ``default_namespace`` come from the
+        dashboard's env config (YANTRIKDB_NAMESPACE,
+        YANTRIKDB_DASHBOARD_NAMESPACE). They're surfaced here so the
+        frontend can default the namespace selector to a real namespace
+        — sending ``__all__`` to the server's /v1/stats or /v1/memories
+        would 400 because the server has no dashboard magic value.
         """
         body = self._request("GET", "/v1/health")
         cluster = body.get("cluster") or {}
@@ -127,6 +134,8 @@ class HTTPBackend:
             "yantrikdb_version": body.get("version") or "0.8.17+",
             "cluster": cluster,
             "engines_loaded": body.get("engines_loaded"),
+            "base_namespace": base_namespace,
+            "default_namespace": default_namespace,
             "namespaces": [],  # populated lazily by /api/stats per namespace
         }
 
@@ -179,19 +188,25 @@ class HTTPBackend:
         if source:
             params["source"] = source
         if memory_type:
-            params["type"] = memory_type
+            params["memory_type"] = memory_type
         if q:
             params["q"] = q
         body = self._request("GET", "/v1/memories", params=params)
         return body  # server shape matches dashboard expectations
 
-    def get_memory(self, rid: str) -> dict[str, Any]:
-        """Proxy /v1/memory/{rid}. Phase 1 server may return null for
-        updated_at / tombstone_reason / embedding_model / embedding_bytes
-        and empty arrays for consolidation_sources / entities / claims —
-        the UI is expected to handle those nulls.
+    def get_memory(self, rid: str, namespace: str) -> dict[str, Any]:
+        """Proxy /v1/memory/{rid} with explicit namespace.
+
+        Cluster-wide / admin tokens require a namespace param; pinned
+        tokens can only read their own. Without ``namespace`` the server
+        can 400/403 on cluster deployments. The dashboard always knows
+        which namespace it's browsing, so we forward it.
+
+        Phase 1 server may return null for updated_at / tombstone_reason
+        / embedding_model / embedding_bytes and empty arrays for
+        consolidation_sources / entities / claims — the UI handles those.
         """
-        return self._request("GET", f"/v1/memory/{rid}")
+        return self._request("GET", f"/v1/memory/{rid}", params={"namespace": namespace})
 
     # ----- Routes pending server endpoints (issue #39 Phase 2/3) -----
 

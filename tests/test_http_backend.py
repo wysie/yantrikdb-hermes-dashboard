@@ -123,7 +123,12 @@ def test_list_memories_forwards_filter_params(monkeypatch):
     assert p["namespace"] == "default"
     assert p["domain"] == "work"
     assert p["source"] == "user"
-    assert p["type"] == "semantic"   # memory_type renamed to 'type' on the wire
+    # yantrikdb-server /v1/memories filter is `memory_type` (NOT `type` —
+    # the engine table column is `type` but the HTTP query param mirrors
+    # the dashboard's own parameter name so the contract stays consistent
+    # across SQLite and HTTP modes).
+    assert p["memory_type"] == "semantic"
+    assert "type" not in p
     assert p["q"] == "alpha"
     assert p["limit"] == 25
     assert p["offset"] == 10
@@ -139,8 +144,27 @@ def test_list_memories_omits_empty_filters(monkeypatch):
     assert "domain" not in p
     assert "source" not in p
     assert "type" not in p
+    assert "memory_type" not in p
     assert "q" not in p
     assert p["namespace"] == "default"
+
+
+def test_get_memory_forwards_namespace(monkeypatch):
+    """Cluster-wide / admin tokens require an explicit namespace on
+    /v1/memory/{rid}; pinned tokens can only read their own. Without
+    it the detail drawer can 400/403 in HTTP mode."""
+    backend = HTTPBackend("http://cluster:7438")
+    captured: dict[str, Any] = {}
+    def capture(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["params"] = kwargs.get("params")
+        return _fake_response(200, {"rid": "r1", "text": "hello"})
+    monkeypatch.setattr(backend._session, "request", capture)
+    backend.get_memory("r1", namespace="hermes:hermes:default")
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/v1/memory/r1")
+    assert captured["params"] == {"namespace": "hermes:hermes:default"}
 
 
 def test_phase_2_3_methods_raise_not_implemented():
@@ -165,7 +189,41 @@ def test_health_route_uses_http_backend_when_set(monkeypatch):
     body = response.json()
     assert body["mode"] == "http"
     assert body["server_url"] == "http://x:7438"
-    stub.health.assert_called_once()
+    # The dashboard injects its env-derived namespaces into the HTTP-mode
+    # health call so the frontend can default the namespace selector to a
+    # real namespace instead of sending __all__ to /v1/stats (which would 400).
+    call_kwargs = stub.health.call_args.kwargs
+    assert call_kwargs["base_namespace"] == dashboard.BASE_NAMESPACE
+    assert call_kwargs["default_namespace"] == dashboard.DEFAULT_NAMESPACE
+
+
+def test_http_health_includes_base_and_default_namespace():
+    """End-to-end: HTTPBackend.health() includes the dashboard's
+    base_namespace + default_namespace so the frontend has a real fallback
+    in HTTP mode where local-namespace enumeration isn't available."""
+    backend = HTTPBackend("http://cluster:7438")
+    import requests
+    server_body = {"status": "ok", "cluster": {"healthy": True, "role": "Leader"}}
+    # monkey-patch via the session directly
+    real_request = backend._session.request
+
+    def stub(method, url, **kwargs):  # type: ignore[no-untyped-def]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"x"
+        resp.json.return_value = server_body
+        return resp
+
+    backend._session.request = stub  # type: ignore[method-assign]
+    try:
+        body = backend.health(
+            base_namespace="hermes",
+            default_namespace="hermes:hermes:default",
+        )
+    finally:
+        backend._session.request = real_request  # type: ignore[method-assign]
+    assert body["base_namespace"] == "hermes"
+    assert body["default_namespace"] == "hermes:hermes:default"
 
 
 def test_stats_route_uses_http_backend_when_set(monkeypatch):
@@ -198,10 +256,23 @@ def test_memory_detail_route_uses_http_backend_when_set(monkeypatch):
     stub.get_memory.return_value = {"rid": "r1", "text": "hello"}
     monkeypatch.setattr(dashboard, "HTTP_BACKEND", stub)
     client = TestClient(dashboard.app)
-    response = client.get("/api/memory/r1")
+    response = client.get("/api/memory/r1?namespace=tenant:ns")
     assert response.status_code == 200
     assert response.json()["rid"] == "r1"
-    stub.get_memory.assert_called_once_with("r1")
+    stub.get_memory.assert_called_once_with("r1", namespace="tenant:ns")
+
+
+def test_memory_detail_route_defaults_namespace_when_omitted(monkeypatch):
+    """Frontend should pass namespace, but if omitted (older clients) we
+    fall back to the dashboard's configured default rather than sending
+    nothing to a server that would 400."""
+    stub = MagicMock(spec=HTTPBackend)
+    stub.get_memory.return_value = {"rid": "r1"}
+    monkeypatch.setattr(dashboard, "HTTP_BACKEND", stub)
+    client = TestClient(dashboard.app)
+    response = client.get("/api/memory/r1")
+    assert response.status_code == 200
+    stub.get_memory.assert_called_once_with("r1", namespace=dashboard.DEFAULT_NAMESPACE)
 
 
 def test_connect_raises_501_in_http_mode(monkeypatch):
@@ -225,6 +296,73 @@ def test_unwrapped_route_returns_501_via_connect_guard(monkeypatch):
         response = client.get(path)
         assert response.status_code == 501, f"{path} should 501 in HTTP mode"
         assert "issues/39" in response.json()["detail"]
+
+
+def test_engine_first_routes_501_when_local_engine_present(monkeypatch):
+    """Regression for wysie's review: several routes called engine()
+    before any SQL helper, so they bypassed the connect() guard and
+    silently returned local-engine data while the dashboard was
+    supposedly in HTTP cluster mode. These per-route HTTP_BACKEND guards
+    fix that and must hold even when a usable engine handle exists.
+    """
+    stub = MagicMock(spec=HTTPBackend)
+    monkeypatch.setattr(dashboard, "HTTP_BACKEND", stub)
+    monkeypatch.setattr(dashboard, "ADMIN_MODE_ENV", True)
+
+    # Pre-populate _db_handle with a fake engine that would happily serve
+    # results if a route slipped through. The guard must short-circuit
+    # before any engine method is touched.
+    fake_engine = MagicMock()
+    fake_engine.get_conflicts.return_value = [{"conflict_id": "leaked"}]
+    fake_engine.get_conflict.return_value = {"conflict_id": "leaked"}
+    fake_engine.resolve_conflict.return_value = {"ok": True}
+    fake_engine.recall_with_response.return_value = {"results": [{"rid": "leaked"}]}
+    fake_engine.think.return_value = {"ok": True}
+    fake_engine.forget.return_value = True
+    fake_engine.stale.return_value = [{"rid": "leaked"}]
+    fake_engine.upcoming.return_value = [{"rid": "leaked"}]
+    fake_engine.get_edges.return_value = [{"src": "a", "dst": "b"}]
+    monkeypatch.setattr(dashboard, "_db_handle", fake_engine)
+    monkeypatch.setattr(dashboard, "engine", lambda: fake_engine)
+
+    client = TestClient(dashboard.app)
+
+    get_paths = (
+        "/api/conflicts",
+        "/api/conflicts/c1",
+        "/api/stale",
+        "/api/upcoming",
+        "/api/graph/some_entity",
+        "/api/identity-scope",
+        "/api/constellation",
+        "/api/export/memories.jsonl",
+    )
+    for path in get_paths:
+        response = client.get(path)
+        assert response.status_code == 501, f"{path} should 501 in HTTP mode, got {response.status_code}"
+        assert "issues/39" in response.json()["detail"]
+
+    post_paths = (
+        ("/api/recall", {"query": "anything"}),
+        ("/api/think", {}),
+        ("/api/memory/r1/forget", {}),
+        ("/api/conflicts/c1/resolve", {"strategy": "keep_a", "winner_rid": "r1"}),
+    )
+    for path, body in post_paths:
+        response = client.post(path, json=body)
+        assert response.status_code == 501, f"{path} should 501 in HTTP mode, got {response.status_code}"
+        assert "issues/39" in response.json()["detail"]
+
+    # And: none of those guards ever reached the fake engine.
+    fake_engine.get_conflicts.assert_not_called()
+    fake_engine.get_conflict.assert_not_called()
+    fake_engine.resolve_conflict.assert_not_called()
+    fake_engine.recall_with_response.assert_not_called()
+    fake_engine.think.assert_not_called()
+    fake_engine.forget.assert_not_called()
+    fake_engine.stale.assert_not_called()
+    fake_engine.upcoming.assert_not_called()
+    fake_engine.get_edges.assert_not_called()
 
 
 def test_sqlite_mode_still_works_when_http_backend_unset(monkeypatch, tmp_path):

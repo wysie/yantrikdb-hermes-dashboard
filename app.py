@@ -306,7 +306,10 @@ def index() -> FileResponse:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     if HTTP_BACKEND is not None:
-        return HTTP_BACKEND.health()
+        return HTTP_BACKEND.health(
+            base_namespace=BASE_NAMESPACE,
+            default_namespace=DEFAULT_NAMESPACE,
+        )
     try:
         core_version = importlib_metadata.version("yantrikdb")
     except Exception:
@@ -615,11 +618,15 @@ def identity_scope_payload() -> dict[str, Any]:
 
 @app.get("/api/identity-scope")
 def get_identity_scope() -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("identity-scope")
     return identity_scope_payload()
 
 
 @app.post("/api/identity-scope")
 def update_identity_scope(req: IdentityScopeRequest, request: Request) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("identity-scope")
     require_admin(request)
     data = load_dashboard_settings()
     data["identity_scope"] = normalise_identity_scope_config(req.identity_scope)
@@ -857,9 +864,9 @@ def memories(
 
 
 @app.get("/api/memory/{rid}")
-def memory_detail(rid: str) -> dict[str, Any]:
+def memory_detail(rid: str, namespace: str = Query(DEFAULT_NAMESPACE)) -> dict[str, Any]:
     if HTTP_BACKEND is not None:
-        return HTTP_BACKEND.get_memory(rid)
+        return HTTP_BACKEND.get_memory(rid, namespace=namespace)
     m = one("SELECT *, length(embedding) embedding_bytes FROM memories WHERE rid=?", (rid,))
     if not m:
         raise HTTPException(404, "memory not found")
@@ -926,6 +933,8 @@ def sql_recall_fallback(query: str, namespace: str, limit: int, domain: str | No
 
 @app.post("/api/recall")
 def recall(req: RecallRequest) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("recall")
     if not req.query.strip():
         raise HTTPException(400, "query required")
     namespace = req.namespace or DEFAULT_NAMESPACE
@@ -974,6 +983,8 @@ def recall(req: RecallRequest) -> dict[str, Any]:
 
 @app.get("/api/conflicts")
 def conflicts(namespace: str = Query(DEFAULT_NAMESPACE), status: str = "", limit: int = Query(50, le=200)) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("conflicts")
     try:
         items = engine().get_conflicts(namespace=namespace, status=status or None, limit=limit)
         return {"items": list(items) if items else []}
@@ -991,6 +1002,8 @@ def conflicts(namespace: str = Query(DEFAULT_NAMESPACE), status: str = "", limit
 
 @app.get("/api/conflicts/{conflict_id}")
 def conflict_detail(conflict_id: str) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("conflict_detail")
     try:
         c = engine().get_conflict(conflict_id)
         return c if isinstance(c, dict) else {"conflict": c}
@@ -1003,6 +1016,8 @@ def conflict_detail(conflict_id: str) -> dict[str, Any]:
 
 @app.post("/api/conflicts/{conflict_id}/resolve")
 def resolve_conflict(conflict_id: str, req: ResolveRequest, request: Request) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("conflict_resolve")
     require_admin(request)
     try:
         out = engine().resolve_conflict(conflict_id, req.strategy, winner_rid=req.winner_rid, new_text=req.new_text, resolution_note=req.resolution_note)
@@ -1013,6 +1028,8 @@ def resolve_conflict(conflict_id: str, req: ResolveRequest, request: Request) ->
 
 @app.post("/api/think")
 def run_think(req: ThinkRequest, request: Request) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("think")
     require_admin(request)
     cfg = req.model_dump(exclude_none=True)
     try:
@@ -1024,6 +1041,8 @@ def run_think(req: ThinkRequest, request: Request) -> dict[str, Any]:
 
 @app.post("/api/memory/{rid}/forget")
 def forget_memory(rid: str, request: Request) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("forget")
     require_admin(request)
     try:
         found = bool(engine().forget(rid))
@@ -1083,6 +1102,8 @@ def constellation(namespace: str = Query(DEFAULT_NAMESPACE), limit: int = Query(
     visual map from high-importance/recent memories plus lightweight local term
     extraction. No external calls, no DB mutation.
     """
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("constellation")
     clauses, params = namespace_clause("namespace", namespace)
     clauses.append("consolidation_status IN ('active','consolidated')")
     where_sql = " AND ".join(clauses)
@@ -1248,6 +1269,8 @@ def entities(q: str = "", limit: int = Query(50, le=200)) -> dict[str, Any]:
 
 @app.get("/api/graph/{entity}")
 def graph(entity: str, namespace: str = Query(DEFAULT_NAMESPACE)) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("graph")
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     try:
@@ -1304,6 +1327,8 @@ def sessions(namespace: str = Query(DEFAULT_NAMESPACE), limit: int = Query(50, l
 
 @app.get("/api/stale")
 def stale(namespace: str = Query(DEFAULT_NAMESPACE), days: float = 30.0, limit: int = Query(50, le=200)) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("stale")
     try:
         items = engine().stale(days=days, limit=limit, namespace=namespace)
         return {"items": list(items) if items else []}
@@ -1314,6 +1339,8 @@ def stale(namespace: str = Query(DEFAULT_NAMESPACE), days: float = 30.0, limit: 
 
 @app.get("/api/upcoming")
 def upcoming(namespace: str = Query(DEFAULT_NAMESPACE), days: float = 7.0, limit: int = Query(50, le=200)) -> dict[str, Any]:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("upcoming")
     try:
         items = engine().upcoming(days=days, limit=limit, namespace=namespace)
         return {"items": list(items) if items else []}
@@ -1324,6 +1351,8 @@ def upcoming(namespace: str = Query(DEFAULT_NAMESPACE), days: float = 7.0, limit
 
 @app.get("/api/export/memories.jsonl")
 def export_memories(namespace: str = Query(DEFAULT_NAMESPACE), status: str = "active") -> StreamingResponse:
+    if HTTP_BACKEND is not None:
+        raise not_implemented_response("export")
     def generate():
         offset = 0
         while True:
