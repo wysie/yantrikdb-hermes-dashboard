@@ -1173,7 +1173,7 @@ def test_dashboard_contract_for_0417_features():
     assert ".runtime-warning" in css
 
 
-def test_connect_opens_the_engine_store_read_only(tmp_path, monkeypatch):
+def test_raw_sql_reads_the_engine_store_read_only(tmp_path, monkeypatch):
     """The raw-SQL helpers must never be able to commit to the engine's store.
 
     The dashboard's stdlib ``sqlite3`` connection is a second SQLite library
@@ -1198,8 +1198,7 @@ def test_connect_opens_the_engine_store_read_only(tmp_path, monkeypatch):
 
     # Writes are refused by SQLite itself, not merely by convention.
     with pytest.raises(sqlite3.OperationalError, match="readonly database"):
-        with dashboard.connect() as conn:
-            conn.execute("INSERT INTO memories (rid) VALUES ('rid-2')")
+        dashboard.rows("INSERT INTO memories (rid) VALUES ('rid-2')")
 
     # The store is unchanged.
     with sqlite3.connect(db_path) as check:

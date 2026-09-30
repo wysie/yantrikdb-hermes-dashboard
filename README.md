@@ -71,6 +71,22 @@ YANTRIKDB_DB_PATH=~/.hermes/yantrikdb-memory.db \
 scripts/start.sh
 ```
 
+### SQLite process isolation
+
+Raw SQL reads run in short-lived, read-only Python subprocesses. This is
+intentional: the dashboard also retains a YantrikDB engine for recall and admin
+operations, and opening its store with a second SQLite library in that same
+process is unsafe on Linux/macOS, even with `mode=ro`. See
+[YantrikDB's concurrency rule 9](https://github.com/yantrikos/yantrikdb/blob/main/CONCURRENCY.md#rule-9--one-sqlite-library-per-process-never-open-the-store-with-another-one-while-the-engine-is-open).
+
+Readers use normal SQLite locking and observe committed WAL data; they do not
+use `immutable=1` or change the database's journal mode. Each connection closes
+on success or failure, and readers have a 30-second overall timeout. The
+process-per-query boundary trades some latency for simple, reliable isolation.
+Writes still go through the YantrikDB engine and existing admin controls.
+Run the dashboard as its own service, and do not open the engine store with
+stdlib `sqlite3` in an application that also holds a YantrikDB engine.
+
 ## Optional: HTTP backend mode (talk to a yantrikdb-server cluster)
 
 The default mode reads the embedded-mode SQLite store at `YANTRIKDB_DB_PATH` directly — perfect for the single-instance Hermes plugin install. If you instead run `yantrikdb-server` on an HA cluster, set `YANTRIKDB_SERVER_URL` and the dashboard proxies supported routes to the cluster instead:
@@ -261,7 +277,9 @@ python -m pytest
 npm run build:css
 ```
 
-The tests avoid requiring a real YantrikDB database for basic smoke coverage.
+The tests use only disposable synthetic databases. Install `yantrikdb==0.23.1`
+to include the live-engine process-isolation regression; without that wheel,
+only that optional test skips. CI runs it on Linux, macOS, and Windows.
 
 ## Repository hygiene
 

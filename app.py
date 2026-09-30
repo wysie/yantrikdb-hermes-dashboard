@@ -12,7 +12,6 @@ import hmac
 import os
 import re
 import secrets
-import sqlite3
 import sys
 import time
 from collections import Counter, defaultdict
@@ -24,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from sqlite_reader import query as read_sql
 
 try:
     import importlib.metadata as importlib_metadata
@@ -81,46 +82,23 @@ def now() -> float:
     return time.time()
 
 
-def connect() -> sqlite3.Connection:
-    # In HTTP-backend mode there is no local SQLite file by design.
-    # Any route that still falls through to a SQL helper (rows/one/etc.)
-    # is one we haven't wrapped yet — surface that as a 501 with a
-    # clear pointer to issue #39 rather than a confusing 500.
+def require_local_store() -> None:
+    # HTTP mode must fail before launching a reader or touching a local store.
     if HTTP_BACKEND is not None:
         raise not_implemented_response("SQL-backed route")
     if not DB_PATH.exists():
         raise HTTPException(500, f"YantrikDB database not found: {DB_PATH}")
-    # Read-only on purpose. This connection is a *second* SQLite library
-    # on a store the engine owns (stdlib sqlite3 vs the engine's bundled
-    # rusqlite), and every raw-SQL helper below only ever SELECTs or reads
-    # a PRAGMA. Opening with mode=ro makes that an enforced invariant
-    # instead of a convention: the dashboard then cannot commit to the
-    # store, so it cannot bump `PRAGMA data_version` under the engine's
-    # writer connection. That bump is what makes the engine queue a
-    # `quick_check` and, if the check comes back anything but "ok", latch
-    # `foreign_sqlite_tainted` and refuse *all* writes until it is
-    # reopened (yantrikos/yantrikdb#225, yantrikos/yantrikdb#247).
-    #
-    # Note this does not make the pairing safe on Linux/macOS when the
-    # dashboard shares a process with the engine: a read-only WAL reader
-    # still maps the -shm segment, which is what the #225 detector keys
-    # on. Keeping the dashboard in its own process remains required.
-    conn = sqlite3.connect(f"file:{DB_PATH.as_posix()}?mode=ro", uri=True, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def rows(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    with connect() as conn:
-        cur = conn.execute(sql, params)
-        return [dict(r) for r in cur.fetchall()]
+    require_local_store()
+    return read_sql(DB_PATH, sql, params)
 
 
 def one(sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-    with connect() as conn:
-        cur = conn.execute(sql, params)
-        r = cur.fetchone()
-        return dict(r) if r else None
+    require_local_store()
+    result = read_sql(DB_PATH, sql, params, first=True)
+    return result[0] if result else None
 
 
 def table_exists(name: str) -> bool:
