@@ -1171,3 +1171,36 @@ def test_dashboard_contract_for_0417_features():
     assert ".score-breakdown" in css
     assert ".trigger-actions" in css
     assert ".runtime-warning" in css
+
+
+def test_connect_opens_the_engine_store_read_only(tmp_path, monkeypatch):
+    """The raw-SQL helpers must never be able to commit to the engine's store.
+
+    The dashboard's stdlib ``sqlite3`` connection is a second SQLite library
+    on a file the engine owns. A commit from it bumps ``PRAGMA data_version``
+    under the engine's writer connection, which makes the engine queue a
+    ``quick_check`` and, on a non-"ok" result, latch ``foreign_sqlite_tainted``
+    and refuse every write until it is reopened
+    (yantrikos/yantrikdb#225, yantrikos/yantrikdb#247).
+    """
+    db_path = tmp_path / "yantrikdb.db"
+    with sqlite3.connect(db_path) as seed:
+        seed.execute("CREATE TABLE memories (rid TEXT PRIMARY KEY)")
+        seed.execute("INSERT INTO memories (rid) VALUES ('rid-1')")
+        seed.commit()
+
+    monkeypatch.setattr(dashboard, "DB_PATH", db_path)
+    monkeypatch.setattr(dashboard, "HTTP_BACKEND", None)
+
+    # Reads still work, including the read-only PRAGMA the helpers use.
+    assert dashboard.rows("SELECT rid FROM memories") == [{"rid": "rid-1"}]
+    assert dashboard.rows("PRAGMA table_info(memories)")
+
+    # Writes are refused by SQLite itself, not merely by convention.
+    with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+        with dashboard.connect() as conn:
+            conn.execute("INSERT INTO memories (rid) VALUES ('rid-2')")
+
+    # The store is unchanged.
+    with sqlite3.connect(db_path) as check:
+        assert check.execute("SELECT count(*) FROM memories").fetchone()[0] == 1

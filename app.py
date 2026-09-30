@@ -90,7 +90,22 @@ def connect() -> sqlite3.Connection:
         raise not_implemented_response("SQL-backed route")
     if not DB_PATH.exists():
         raise HTTPException(500, f"YantrikDB database not found: {DB_PATH}")
-    conn = sqlite3.connect(str(DB_PATH), timeout=5.0)
+    # Read-only on purpose. This connection is a *second* SQLite library
+    # on a store the engine owns (stdlib sqlite3 vs the engine's bundled
+    # rusqlite), and every raw-SQL helper below only ever SELECTs or reads
+    # a PRAGMA. Opening with mode=ro makes that an enforced invariant
+    # instead of a convention: the dashboard then cannot commit to the
+    # store, so it cannot bump `PRAGMA data_version` under the engine's
+    # writer connection. That bump is what makes the engine queue a
+    # `quick_check` and, if the check comes back anything but "ok", latch
+    # `foreign_sqlite_tainted` and refuse *all* writes until it is
+    # reopened (yantrikos/yantrikdb#225, yantrikos/yantrikdb#247).
+    #
+    # Note this does not make the pairing safe on Linux/macOS when the
+    # dashboard shares a process with the engine: a read-only WAL reader
+    # still maps the -shm segment, which is what the #225 detector keys
+    # on. Keeping the dashboard in its own process remains required.
+    conn = sqlite3.connect(f"file:{DB_PATH.as_posix()}?mode=ro", uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
     return conn
 
