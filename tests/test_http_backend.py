@@ -8,7 +8,7 @@ Two layers:
 - ``app`` route guard tests: install a stub backend with
   ``monkeypatch.setattr(dashboard, "HTTP_BACKEND", stub)`` and hit the FastAPI
   app via ``TestClient`` to confirm the early-return wiring + the SQL-fallthrough
-  guard in ``connect()`` both behave correctly.
+  guard in ``require_local_store()`` both behave correctly.
 """
 from __future__ import annotations
 
@@ -275,18 +275,18 @@ def test_memory_detail_route_defaults_namespace_when_omitted(monkeypatch):
     stub.get_memory.assert_called_once_with("r1", namespace=dashboard.DEFAULT_NAMESPACE)
 
 
-def test_connect_raises_501_in_http_mode(monkeypatch):
+def test_local_store_guard_raises_501_in_http_mode(monkeypatch):
     stub = MagicMock(spec=HTTPBackend)
     monkeypatch.setattr(dashboard, "HTTP_BACKEND", stub)
     with pytest.raises(Exception) as exc:
-        dashboard.connect()
+        dashboard.require_local_store()
     assert exc.value.status_code == 501
     assert "issues/39" in exc.value.detail
 
 
-def test_unwrapped_route_returns_501_via_connect_guard(monkeypatch):
-    """Routes we haven't wrapped (e.g. /api/entities) still call connect()/
-    rows() internally. The guard in connect() turns SQL fallthrough into a
+def test_unwrapped_route_returns_501_via_local_store_guard(monkeypatch):
+    """Routes we haven't wrapped (e.g. /api/entities) still call require_local_store()/
+    rows() internally. The guard in require_local_store() turns SQL fallthrough into a
     clean 501 instead of a confusing 500 in HTTP mode."""
     stub = MagicMock(spec=HTTPBackend)
     monkeypatch.setattr(dashboard, "HTTP_BACKEND", stub)
@@ -300,7 +300,7 @@ def test_unwrapped_route_returns_501_via_connect_guard(monkeypatch):
 
 def test_engine_first_routes_501_when_local_engine_present(monkeypatch):
     """Regression for wysie's review: several routes called engine()
-    before any SQL helper, so they bypassed the connect() guard and
+    before any SQL helper, so they bypassed the require_local_store() guard and
     silently returned local-engine data while the dashboard was
     supposedly in HTTP cluster mode. These per-route HTTP_BACKEND guards
     fix that and must hold even when a usable engine handle exists.

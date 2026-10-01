@@ -33,7 +33,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["app", "backend"]
+py-modules = ["app", "backend", "sqlite_reader"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
